@@ -10,7 +10,7 @@
   },
   "regions": [
     {
-      "DisplayName": "Тест сервере",
+      "DisplayName": "Европа",
       "Location": "eu",
       "Dns": "http://92.38.154.54:5055/",
       "Ip": "92.38.154.54",
