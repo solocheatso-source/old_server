@@ -1,11 +1,14 @@
 # database.py - MongoDB база данных для V2 Standoff Server
 import json
+import logging
 import os
 from typing import Dict, Any, Optional, List
 from datetime import datetime, timedelta
 import pymongo
 from pymongo import MongoClient
 from bson import ObjectId
+
+logger = logging.getLogger("V2Server")
 
 class Database:
     """MongoDB база данных для игрового сервера"""
@@ -18,13 +21,13 @@ class Database:
             self.client = MongoClient(connection_string, serverSelectionTimeoutMS=5000)
             self.client.server_info()  # Проверяем соединение
             self.db = self.client[db_name]
-            print(f"✓ Connected to MongoDB: {db_name}")
+            logger.info("Connected to MongoDB: %s", db_name)
             
             # Создаем индексы
             self._create_indexes()
             
         except Exception as e:
-            print(f"✗ MongoDB connection failed: {e}")
+            logger.error("MongoDB connection failed: %s", e)
             raise Exception("MongoDB is required! Please start MongoDB server.")
     
     def _create_indexes(self):
@@ -41,7 +44,7 @@ class Database:
                 self.db.sessions.delete_many({"ticket": None})
                 self.db.sessions.delete_many({"ticket": {"$exists": False}})
             except Exception as e:
-                print(f"Warning: Session cleanup failed: {e}")
+                logger.warning("Session cleanup failed: %s", e)
 
             self.db.sessions.create_index("ticket", unique=True, sparse=True)
             self.db.sessions.create_index("created_at", expireAfterSeconds=86400)  # 24 часа
@@ -66,9 +69,9 @@ class Database:
             self.db.promocodes.create_index("code", unique=True)
             self.db.promocode_redemptions.create_index([("code", 1), ("user_id", 1)], unique=True)
             
-            print("✓ Database indexes created")
+            logger.info("Database indexes created")
         except Exception as e:
-            print(f"Warning: Index creation failed: {e}")
+            logger.warning("Index creation failed: %s", e)
     
     # ===== USERS =====
     
@@ -441,10 +444,10 @@ class Database:
             if items:
                 self.db.item_definitions.insert_many(items)
             
-            print(f"✓ Initialized {len(items)} item definitions")
+            logger.info("Initialized %s item definitions", len(items))
             return True
         except Exception as e:
-            print(f"✗ Failed to init item definitions: {e}")
+            logger.exception("Failed to init item definitions: %s", e)
             return False
     
     def get_item_definitions(self) -> Dict[int, Dict[str, Any]]:
