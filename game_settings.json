@@ -1,0 +1,156 @@
+{
+  "photon_servers": [
+    "be1a8d5e-a479-4a46-9fbb-8372f4a1682a",
+    "d3ef64ee-3bca-4592-ae0e-4501d25f94a5",
+    "d32dadc45-165f-4db3-8f7f-1cafa8303b54"
+  ],
+  "photon_settings": {
+    "OnlineCoefficient": 1,
+    "ReconnectIntervalMs": 1000
+  },
+  "regions": [
+    {
+      "DisplayName": "Тест сервере",
+      "Location": "eu",
+      "Dns": "http://92.38.154.54:5055/",
+      "Ip": "92.38.154.54",
+      "Online": true,
+      "Enabled": true,
+      "UseAppId": true,
+      "AppId": "be1a8d5e-a479-4a46-9fbb-8372f4a1682a",
+      "UseMasterServer": true,
+      "MasterServer": "92.38.154.54:5055",
+      "CloudRegionCode": "eu"
+    }
+  ],
+  "game_servers": [
+    {
+      "Id": "server_ru_001",
+      "Ip": "92.38.154.54",
+      "Port": 5055,
+      "Region": "ru",
+      "Name": "Russia Server #1",
+      "Map": "",
+      "Players": 8,
+      "MaxPlayers": 10,
+      "HasPassword": false,
+      "Ping": 50,
+      "AppId": "be1a8d5e-a479-4a46-9fbb-8372f4a1682a"
+    },
+    {
+      "Id": "server_eu_001",
+      "Ip": "92.38.154.54",
+      "Port": 5055,
+      "Region": "eu",
+      "Name": "Europe Server #1",
+      "Map": "de_dust2",
+      "Players": 6,
+      "MaxPlayers": 10,
+      "HasPassword": false,
+      "Ping": 30,
+      "AppId": "d3ef64ee-3bca-4592-ae0e-4501d25f94a5"
+    },
+    {
+      "Id": "server_fr_001",
+      "Ip": "yamanoe.proxy.rlwy.net",
+      "Port": 34331,
+      "Region": "fr",
+      "Name": "France Server #1",
+      "Map": "de_mirage",
+      "Players": 4,
+      "MaxPlayers": 10,
+      "HasPassword": false,
+      "Ping": 25,
+      "AppId": "d32dadc45-165f-4db3-8f7f-1cafa8303b54"
+    }
+  ],
+  "popup_ads": [
+    {
+      "Id": "welcome_ad",
+      "Title": "Welcome!",
+      "Description": "Welcome to Standoff 2!",
+      "ImageUrl": "https://imgfy.ru/ib/7umxcZO9sLqdJn7_1773423744.webp",
+      "ActionUrl": "",
+      "Enabled": false
+    }
+  ],
+  "bonus": [
+    {
+      "Id": "daily_bonus",
+      "TitleText": "Daily Bonus",
+      "InfoText": "Get your daily reward!",
+      "GoldReward": 10,
+      "PhotoUrl": "https://yandex.ru/images/search?pos=4&from=tabbar&img_url=https%3A%2F%2Fi.ytimg.com%2Fvi%2F3n_Lkw4eIHg%2Fmaxresdefault.jpg&text=sstandoff&rpt=simage&lr=38",
+      "PhotoWidth": 0,
+      "DateTimestamp": 0,
+      "FromTimestamp": 0,
+      "UntilTimestamp": 0,
+      "Activations": [],
+      "Name": "Daily Bonus",
+      "Description": "Get your daily reward!",
+      "Reward": {
+        "Coins": 100,
+        "Gold": 1000000
+      },
+      "Enabled": false
+    }
+  ],
+  "anti_cheat_settings": {
+    "UltraAPX": false,
+    "NoRecoil": false,
+    "WeaponAmmo": false,
+    "Wallhack": false,
+    "Damage": false,
+    "Aimbot": false
+  },
+  "hash": [
+    {
+      "version": "1.0.0",
+      "hash": "default_hash_value"
+    }
+  ],
+  "collection_offers": {
+    "ak47_collection": 500,
+    "m4a4_collection": 750
+  },
+  "in_app": [
+    {
+      "InApp": "coins_1000",
+      "Amount": 100,
+      "RedirectUrl": "https://example.com/donate",
+      "RedirectUrl2": "https://example.com/donate2"
+    },
+    {
+      "InApp": "gold_100",
+      "Amount": 200,
+      "RedirectUrl": "https://example.com/donate",
+      "RedirectUrl2": "https://example.com/donate2"
+    }
+  ],
+  "tester_accounts": [
+    "demo_user_123",
+    "test",
+    "tester1",
+    "tester2",
+    "admin"
+  ],
+  "reels_ads": [
+    {
+      "TitleText": "Бля аиздец",
+      "RedirectUrl": "https://imgfy.ru/ib/7umxcZO9sLqdJn7_1773423744.webp",
+      "PhotoUrl": "https://imgfy.ru/ib/7umxcZO9sLqdJn7_1773423744.webp",
+      "PhotoWidth": 0,
+      "DateTimestamp": 20000,
+      "FromTimestamp": 20000,
+      "UntilTimestamp": 20000,
+      "Id": "reel_1",
+      "Title": "Крч ну лан",
+      "VideoUrl": "",
+      "Enabled": false
+    }
+  ],
+  "main_settings": {
+    "HelpUrl": "https://example.com/help",
+    "DisablePacks": true
+  }
+}
