@@ -28,7 +28,7 @@ HOST = "0.0.0.0"
 PORT = int(os.environ.get("PORT", 25505))
 HTTP_PORT = int(os.environ.get("HTTP_PORT", PORT + 1))
 
-# MongoDB конфигурация
+# MongoDB конфигурация - ИСПРАВЛЕНО: убрал порт из URI, он уже есть в строке подключения
 MONGODB_URI = os.environ.get("MONGODB_URI", "mongodb://mongo:odPQUCRuWAiCqADMYBQwRecDahZgVhUN@turntable.proxy.rlwy.net:25506")
 MONGODB_DB = os.environ.get("MONGODB_DB", "v2_standoff")
 MAX_MESSAGE_SIZE = 10 * 1024 * 1024  # 10MB
@@ -93,7 +93,7 @@ class ClientManager:
 
 clients = ClientManager()
 rpc = None  # Будет инициализирован в main() с базой данных
-httpd: ThreadingHTTPServer | None = None
+httpd = None  # База данных
 db = None  # База данных
 
 class HttpHandler(BaseHTTPRequestHandler):
@@ -360,7 +360,7 @@ async def main():
         httpd = ThreadingHTTPServer((HOST, HTTP_PORT), HttpHandler)
         thread = threading.Thread(target=httpd.serve_forever, daemon=True)
         thread.start()
-        logger.info(f"HTTP server listening on http://{HOST}:{HTTP_PORT}")
+        logger.info(f"✓ HTTP server listening on http://{HOST}:{HTTP_PORT}")
     except Exception as e:
         logger.error(f"Failed to start HTTP server: {e}")
     
@@ -378,6 +378,7 @@ async def main():
     try:
         cleanup_thread = threading.Thread(target=lobby_cleanup_worker, daemon=True)
         cleanup_thread.start()
+        logger.info("✓ Lobby cleanup worker started")
     except Exception as e:
         logger.error(f"Failed to start lobby cleanup worker: {e}")
 
@@ -391,7 +392,7 @@ async def main():
         compression=None
     )
     
-    logger.info(f"Server listening on ws://{HOST}:{PORT}")
+    logger.info(f"✓ Server listening on ws://{HOST}:{PORT}")
     
     # Graceful shutdown
     stop = asyncio.Future()
