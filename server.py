@@ -13,6 +13,7 @@ from datetime import datetime
 from typing import Dict, Set
 from rpc_handlers import RPCHandler, DateTimeEncoder
 from database import Database
+from telegram_logging import setup_telegram_logging
 
 # Настройка логирования
 logging.basicConfig(
@@ -21,6 +22,7 @@ logging.basicConfig(
     datefmt='%H:%M:%S'
 )
 logger = logging.getLogger('V2Server')
+setup_telegram_logging(logger)
 
 # Конфигурация сервера
 import os
@@ -214,9 +216,7 @@ async def handle_rpc_request(websocket, message: str, client_id: int) -> None:
                 logger.error(f"Failed to send queued event: {e}")
         
     except Exception as e:
-        logger.error(f"[{client_id}] RPC Error: {e}")
-        import traceback
-        traceback.print_exc()
+        logger.exception(f"[{client_id}] RPC Error: {e}")
         
         error_response = {
             "RpcResponse": {
@@ -336,11 +336,9 @@ async def main():
         logger.info("Connecting to MongoDB...")
         db = Database(MONGODB_URI, MONGODB_DB)
         logger.info(f"✓ Database connected: {MONGODB_DB}")
-    except Exception as e:
-        logger.error(f"✗ Database connection failed: {e}")
+    except Exception:
+        logger.exception("✗ Database connection failed")
         logger.error("Please check your MONGODB_URI and network connection")
-        import traceback
-        traceback.print_exc()
         sys.exit(1)
     
     # Передаем базу данных в RPC handler
@@ -348,10 +346,8 @@ async def main():
         logger.info("Initializing RPC Handler...")
         rpc = RPCHandler(clients, db)
         logger.info("✓ RPC Handler initialized")
-    except Exception as e:
-        logger.error(f"✗ RPC Handler initialization failed: {e}")
-        import traceback
-        traceback.print_exc()
+    except Exception:
+        logger.exception("✗ RPC Handler initialization failed")
         sys.exit(1)
 
     # Start lightweight HTTP server for bonus/promocode endpoints expected by the Unity client.
@@ -425,4 +421,4 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        print("\n[SERVER] Shutting down...")
+        logger.info("[SERVER] Shutting down...")
