@@ -1,0 +1,10 @@
+# V2 Standoff Server Requirements
+
+# WebSocket сервер
+websockets==12.0
+
+# MongoDB драйвер
+pymongo==4.6.1
+
+# Дополнительные утилиты
+python-dateutil==2.8.2
