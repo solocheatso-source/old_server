@@ -2,11 +2,14 @@ import json
 import uuid
 import random
 import os
+import logging
 from datetime import datetime, timedelta
 from typing import Dict, List, Any, Optional
 from database import Database
 from real_items_collection import ITEMS_DATA
 from bson import ObjectId
+
+logger = logging.getLogger("V2Server")
 
 class DateTimeEncoder(json.JSONEncoder):
     """Кастомный JSON encoder для datetime объектов"""
@@ -451,7 +454,7 @@ class RPCHandler:
                     if collection and collection != "None":
                         self._weapon_skins_by_collection.setdefault(str(collection), []).append(item_id_int)
         except Exception as e:
-            print(f"Warning: Failed to init items: {e}")
+            logger.exception("Failed to init items: %s", e)
 
     def _normalize_item_definitions(self, items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """
@@ -2675,7 +2678,7 @@ class RPCHandler:
                 return {"Return": filtered_servers, "Exception": None}
                 
             except Exception as e:
-                print(f"Error loading game servers: {e}")
+                logger.exception("Error loading game servers: %s", e)
                 # Fallback серверы если файл не читается
                 servers = [
                     {
