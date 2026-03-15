@@ -126,6 +126,21 @@ PORT=8080 python server.py
 - Результаты выполнения
 - Ошибки
 
+### Telegram (опционально)
+
+Если заданы переменные окружения, сервер будет дублировать логи в Telegram бота (не блокируя основной поток):
+
+Обязательные:
+- `TELEGRAM_BOT_TOKEN`
+- `TELEGRAM_CHAT_ID`
+
+Опциональные:
+- `TELEGRAM_LOG_LEVEL` (по умолчанию: `ERROR`)
+- `TELEGRAM_LOG_TIMEOUT_S` (по умолчанию: `5`)
+- `TELEGRAM_LOG_MAX_QUEUE` (по умолчанию: `200`)
+- `TELEGRAM_LOG_MIN_INTERVAL_S` (по умолчанию: `1.0`)
+- `TELEGRAM_LOG_PREFIX` (по умолчанию: `[V2Server]`)
+
 ## Особенности
 
 - Автоматическое создание пользователей при первом входе
