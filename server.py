@@ -94,6 +94,7 @@ class ClientManager:
 clients = ClientManager()
 rpc = None  # Будет инициализирован в main() с базой данных
 httpd: ThreadingHTTPServer | None = None
+db = None  # База данных
 
 class HttpHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):  # noqa: A003
@@ -109,7 +110,10 @@ class HttpHandler(BaseHTTPRequestHandler):
                 promo = (qs.get("promo") or [""])[0]
                 result = "error"
                 try:
-                    result = rpc.activate_promocode(str(user_id), str(promo))
+                    if rpc:  # Проверяем, что rpc инициализирован
+                        result = rpc.activate_promocode(str(user_id), str(promo))
+                    else:
+                        result = "server_not_ready"
                 except Exception as e:
                     logger.error(f"Promocode handler error: {e}")
                     result = "error"
@@ -141,6 +145,10 @@ async def handle_ping(websocket, message: bytes) -> bool:
 
 async def handle_rpc_request(websocket, message: str, client_id: int) -> None:
     """Обработка RPC запроса"""
+    if not rpc:
+        logger.error(f"[{client_id}] RPC handler not initialized")
+        return
+        
     try:
         request = json.loads(message)
     except json.JSONDecodeError as e:
@@ -247,18 +255,19 @@ async def handle_client(websocket: websockets.WebSocketServerProtocol):
         logger.error(f"Client error: {client_id}, {type(e).__name__}: {e}")
     finally:
         # Обрабатываем отключение пользователя
-        rpc.disconnect_user(client_id)
+        if rpc:
+            rpc.disconnect_user(client_id)
 
-        # Flush any queued async events generated during disconnect (friends/lobby cleanup).
-        try:
-            pending = rpc.drain_pending_events()
-        except Exception:
-            pending = []
-        for ev in pending or []:
+            # Flush any queued async events generated during disconnect (friends/lobby cleanup).
             try:
-                await send_event(ev.get("client_id"), ev.get("event_name"), ev.get("listener_name"), ev.get("params"))
-            except Exception as e:
-                logger.error(f"Failed to send queued event (disconnect): {e}")
+                pending = rpc.drain_pending_events()
+            except Exception:
+                pending = []
+            for ev in pending or []:
+                try:
+                    await send_event(ev.get("client_id"), ev.get("event_name"), ev.get("listener_name"), ev.get("params"))
+                except Exception as e:
+                    logger.error(f"Failed to send queued event (disconnect): {e}")
 
         clients.remove(client_id)
         logger.info(f"Client removed: {client_id} (total: {clients.count})")
@@ -315,17 +324,35 @@ def print_banner():
 async def main():
     print_banner()
     
+    # Показываем переменные окружения для отладки
+    logger.info(f"Environment variables:")
+    logger.info(f"  PORT: {os.environ.get('PORT', 'not set')}")
+    logger.info(f"  MONGODB_URI: {MONGODB_URI[:50]}...")
+    logger.info(f"  MONGODB_DB: {MONGODB_DB}")
+    
     # Инициализация базы данных
+    global db, rpc
     try:
+        logger.info("Connecting to MongoDB...")
         db = Database(MONGODB_URI, MONGODB_DB)
-        logger.info(f"Database connected: {MONGODB_DB}")
+        logger.info(f"✓ Database connected: {MONGODB_DB}")
     except Exception as e:
-        logger.error(f"Database connection failed: {e}")
+        logger.error(f"✗ Database connection failed: {e}")
+        logger.error("Please check your MONGODB_URI and network connection")
+        import traceback
+        traceback.print_exc()
         sys.exit(1)
     
     # Передаем базу данных в RPC handler
-    global rpc
-    rpc = RPCHandler(clients, db)
+    try:
+        logger.info("Initializing RPC Handler...")
+        rpc = RPCHandler(clients, db)
+        logger.info("✓ RPC Handler initialized")
+    except Exception as e:
+        logger.error(f"✗ RPC Handler initialization failed: {e}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
 
     # Start lightweight HTTP server for bonus/promocode endpoints expected by the Unity client.
     global httpd
@@ -342,7 +369,8 @@ async def main():
     def lobby_cleanup_worker():
         while True:
             try:
-                rpc._maybe_cleanup_lobbies()  # noqa: SLF001
+                if rpc:  # Проверяем, что rpc инициализирован
+                    rpc._maybe_cleanup_lobbies()  # noqa: SLF001
             except Exception as e:
                 logger.error(f"Lobby cleanup error: {e}")
             time.sleep(60)
