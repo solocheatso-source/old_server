@@ -2208,8 +2208,8 @@ class RPCHandler:
         if method == "createLobby":
             name = str(params[0]) if params else "Lobby"
             lobby_type = int(params[1]) if len(params) > 1 else 2  # Public
-            max_members = int(params[2]) if len(params) > 2 else 10
-            max_members = max(2, min(10, max_members))
+            max_members = int(params[2]) if len(params) > 2 else 5
+            max_members = max(2, min(5, max_members))
 
             lobby_data = {
                 "name": name,
@@ -2528,7 +2528,7 @@ class RPCHandler:
             return {"Return": "OK", "Exception": None}
 
         if method == "setLobbyMaxMembers":
-            max_members = int(params[0]) if params else 10
+            max_members = int(params[0]) if params else 5
             lobby = self._get_current_lobby(user_id)
             if not lobby:
                 return exc(EX_NOT_IN_LOBBY, "NotInLobby", "Not in lobby")
@@ -2536,7 +2536,7 @@ class RPCHandler:
             owner_id = str(lobby.get("owner_id") or "")
             if owner_id != user_id:
                 return exc(EX_NOT_LOBBY_OWNER, "NotLobbyOwner", "Only owner can change max members")
-            max_members = max(2, min(10, max_members))
+            max_members = max(2, min(5, max_members))
             self.db.update_lobby(lobby_id, {"max_members": max_members})
             members = lobby.get("members") if isinstance(lobby.get("members"), list) else []
             for mid in members:
