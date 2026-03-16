@@ -3,6 +3,7 @@ import uuid
 import random
 import os
 import logging
+import hashlib
 from datetime import datetime, timedelta
 from typing import Dict, List, Any, Optional
 from database import Database
@@ -39,6 +40,7 @@ class RPCHandler:
         self.services = {
             # Аутентификация
             "V2AuthRemoteService": self.handle_auth_service,
+            "TestAuthRemoteService": self.handle_test_auth_service,
             "GoogleAuthRemoteService": self.handle_google_auth_service,
             "FacebookAuthRemoteService": self.handle_facebook_auth_service,
             "GameCenterAuthRemoteService": self.handle_gamecenter_auth_service,
@@ -1074,126 +1076,148 @@ class RPCHandler:
             "ranked_season_id": "1",
         }
 
+    def _make_external_user_id(self, provider: str, raw: Any) -> str:
+        """
+        Build a stable, short AuthId for external providers (Google/Facebook/GameCenter/etc).
+
+        We intentionally hash the incoming token/code to:
+        - avoid storing long tokens in DB keys
+        - keep AuthId stable for the same credential
+        """
+        provider_s = str(provider or "").strip().lower() or "ext"
+        raw_s = str(raw or "").strip()
+        if not raw_s:
+            return ""
+        digest = hashlib.sha256(raw_s.encode("utf-8", errors="ignore")).hexdigest()[:32]
+        return f"{provider_s}:{digest}"
+
+    def _issue_ticket_for_user(
+        self,
+        user_id: str,
+        version: Any = None,
+        hash_val: Any = None,
+        client_id: int = None,
+        email: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        user_id = str(user_id or "").strip()
+        if not user_id:
+            return {
+                "Return": None,
+                "Exception": {"Id": "AuthFailed", "Code": 401, "Message": "Invalid credentials", "Params": {}},
+            }
+
+        # Maintenance mode (SettingsMain.maintenance_mode = true).
+        settings_main = self.db.get_settings_main() or {}
+        maintenance_enabled = bool(settings_main.get("maintenance_mode") or settings_main.get("MaintenanceMode"))
+        tester_accounts = settings_main.get("tester_accounts") or settings_main.get("TesterAccounts") or []
+        if not isinstance(tester_accounts, list) or len(tester_accounts) == 0:
+            # Fallback to local game_settings.json if DB doesn't provide a whitelist.
+            try:
+                base_dir = os.path.dirname(os.path.abspath(__file__))
+                candidates = [
+                    os.path.join(base_dir, "game_settings.json"),
+                    os.path.join(base_dir, "..", "game_settings.json"),
+                    "game_settings.json",
+                ]
+                settings_path = next((p for p in candidates if os.path.exists(p)), None)
+                if settings_path:
+                    with open(settings_path, "r", encoding="utf-8") as f:
+                        file_settings = json.load(f) or {}
+                    file_testers = file_settings.get("tester_accounts") or []
+                    if isinstance(file_testers, list):
+                        tester_accounts = file_testers
+            except Exception:
+                tester_accounts = []
+
+        if maintenance_enabled and user_id not in tester_accounts:
+            return {
+                "Return": None,
+                "Exception": {
+                    "Id": "MaintenanceMode",
+                    "Code": 503,
+                    "Message": "Server is under maintenance",
+                    "Params": {},
+                },
+            }
+
+        # Ban check.
+        ban = self.db.get_active_ban(user_id)
+        if ban:
+            expires_at = ban.get("expires_at")
+            message = ban.get("reason") or "You are banned"
+            params_out: Dict[str, str] = {}
+            if expires_at is not None:
+                try:
+                    params_out["expires_at"] = expires_at.isoformat() if hasattr(expires_at, "isoformat") else str(expires_at)
+                except Exception:
+                    params_out["expires_at"] = str(expires_at)
+            return {
+                "Return": None,
+                "Exception": {"Id": "Banned", "Code": 403, "Message": message, "Params": params_out},
+            }
+
+        user = self.db.get_user(user_id)
+        if not user:
+            uid_length = random.choice([8, 9])
+            uid = "".join([str(random.randint(0, 9)) for _ in range(uid_length)])
+
+            user_email = str(email or "").strip() or f"{user_id}@v2.local"
+            user_data = {
+                "Id": str(uuid.uuid4()),
+                "Uid": uid,
+                "AuthId": user_id,
+                "Email": user_email,
+                "Name": "Player",
+                "AvatarId": "",
+                "AvatarVideoId": "",
+                "AvatarVideoAccess": False,
+                "GameVersion": str(version) if version is not None else "",
+                "GameHash": str(hash_val) if hash_val is not None else "",
+                "TimeInGame": 0,
+                "RegistrationDate": int(datetime.now().timestamp()),
+                "PlayerStatus": {"OnlineStatus": "StateOnline", "PlayInGame": None},
+            }
+
+            self.db.create_user(user_id, user_data)
+            user = user_data
+        else:
+            self.db.update_user(
+                user_id,
+                {
+                    "GameVersion": str(version) if version is not None else user.get("GameVersion", ""),
+                    "GameHash": str(hash_val) if hash_val is not None else user.get("GameHash", ""),
+                    "PlayerStatus": {"OnlineStatus": "StateOnline", "PlayInGame": None},
+                },
+            )
+
+        ticket = str(uuid.uuid4())
+        self.db.create_session(ticket, user_id)
+        self.current_sessions[ticket] = user_id
+
+        if client_id and self.clients_manager:
+            self.clients_manager.set_user_id(client_id, user_id)
+
+        # Notify online friends about status change.
+        self._notify_friends_player_status_changed(user_id)
+
+        return {"Return": ticket, "Exception": None}
+
     def handle_auth_service(self, method: str, params: List, client_id: int = None) -> Dict[str, Any]:
         """Обработка V2 аутентификации"""
         if method == "auth":
-            login, password, version, hash_val = params[:4]
-            
+            login = str(params[0]) if params else ""
+            password = str(params[1]) if len(params) > 1 else ""
+            version = params[2] if len(params) > 2 else ""
+            hash_val = params[3] if len(params) > 3 else ""
+
             if not login or not password:
                 return {
                     "Return": None,
-                    "Exception": {
-                        "Id": "AuthFailed",
-                        "Code": 401,
-                        "Message": "Invalid credentials",
-                        "Params": {}
-                    }
-                }
-            
-            user_id = f"{login}"
-
-            # Maintenance mode (SettingsMain.maintenance_mode = true).
-            settings_main = self.db.get_settings_main()
-            maintenance_enabled = bool(settings_main.get("maintenance_mode") or settings_main.get("MaintenanceMode"))
-            tester_accounts = settings_main.get("tester_accounts") or settings_main.get("TesterAccounts") or []
-            if not isinstance(tester_accounts, list) or len(tester_accounts) == 0:
-                # Fallback to local game_settings.json if DB doesn't provide a whitelist.
-                try:
-                    base_dir = os.path.dirname(os.path.abspath(__file__))
-                    candidates = [
-                        os.path.join(base_dir, "game_settings.json"),
-                        os.path.join(base_dir, "..", "game_settings.json"),
-                        "game_settings.json",
-                    ]
-                    settings_path = next((p for p in candidates if os.path.exists(p)), None)
-                    if settings_path:
-                        with open(settings_path, "r", encoding="utf-8") as f:
-                            file_settings = json.load(f) or {}
-                        file_testers = file_settings.get("tester_accounts") or []
-                        if isinstance(file_testers, list):
-                            tester_accounts = file_testers
-                except Exception:
-                    tester_accounts = []
-
-            if maintenance_enabled and user_id not in tester_accounts:
-                return {
-                    "Return": None,
-                    "Exception": {
-                        "Id": "MaintenanceMode",
-                        "Code": 503,
-                        "Message": "Server is under maintenance",
-                        "Params": {}
-                    }
+                    "Exception": {"Id": "AuthFailed", "Code": 401, "Message": "Invalid credentials", "Params": {}},
                 }
 
-            # Ban check.
-            ban = self.db.get_active_ban(user_id)
-            if ban:
-                expires_at = ban.get("expires_at")
-                message = ban.get("reason") or "You are banned"
-                params_out: Dict[str, str] = {}
-                if expires_at is not None:
-                    try:
-                        params_out["expires_at"] = expires_at.isoformat() if hasattr(expires_at, "isoformat") else str(expires_at)
-                    except Exception:
-                        params_out["expires_at"] = str(expires_at)
-                return {
-                    "Return": None,
-                    "Exception": {
-                        "Id": "Banned",
-                        "Code": 403,
-                        "Message": message,
-                        "Params": params_out
-                    }
-                }
-            user = self.db.get_user(user_id)
-            
-            if not user:
-                uid_length = random.choice([8, 9])
-                uid = ''.join([str(random.randint(0, 9)) for _ in range(uid_length)])
-                
-                user_data = {
-                    "Id": str(uuid.uuid4()),
-                    "Uid": uid,
-                    "AuthId": user_id,
-                    "Email": f"{user_id}@v2.local",
-                    "Name": "Player",
-                    "AvatarId": "",
-                    "AvatarVideoId": "",
-                    "AvatarVideoAccess": False,
-                    "GameVersion": str(version) if version is not None else "",
-                    "GameHash": str(hash_val) if hash_val is not None else "",
-                    "TimeInGame": 0,
-                    "RegistrationDate": int(datetime.now().timestamp()),
-                    "PlayerStatus": {
-                        "OnlineStatus": "StateOnline",
-                        "PlayInGame": None
-                    }
-                }
-                
-                self.db.create_user(user_id, user_data)
-                user = user_data
-            else:
-                self.db.update_user(user_id, {
-                    "GameVersion": str(version) if version is not None else user.get("GameVersion", ""),
-                    "GameHash": str(hash_val) if hash_val is not None else user.get("GameHash", ""),
-                    "PlayerStatus": {
-                        "OnlineStatus": "StateOnline",
-                        "PlayInGame": None
-                    }
-                })
-            
-            ticket = str(uuid.uuid4())
-            self.db.create_session(ticket, user_id)
-            self.current_sessions[ticket] = user_id
-            
-            if client_id and self.clients_manager:
-                self.clients_manager.set_user_id(client_id, user_id)
-
-            # Notify online friends about status change.
-            self._notify_friends_player_status_changed(user_id)
-            
-            return {"Return": ticket, "Exception": None}
+            user_id = str(login)
+            return self._issue_ticket_for_user(user_id, version, hash_val, client_id)
         
         return {
             "Return": None,
@@ -1205,17 +1229,109 @@ class RPCHandler:
             }
         }
     
+    def handle_test_auth_service(self, method: str, params: List, client_id: int = None) -> Dict[str, Any]:
+        """Auth service used in Unity editor / test builds."""
+        if method == "auth":
+            auth_id = str(params[0]) if params else ""
+            email = str(params[1]) if len(params) > 1 else ""
+            version = params[2] if len(params) > 2 else ""
+            hash_val = params[3] if len(params) > 3 else ""
+
+            user_id = str(auth_id or "").strip()
+            if not user_id:
+                return {
+                    "Return": None,
+                    "Exception": {"Id": "AuthFailed", "Code": 401, "Message": "Invalid credentials", "Params": {}},
+                }
+
+            # Keep AuthId stable and namespaced to avoid collisions with V2 credentials.
+            user_id = self._make_external_user_id("test", user_id) or user_id
+            return self._issue_ticket_for_user(user_id, version, hash_val, client_id, email=email)
+
+        return {
+            "Return": None,
+            "Exception": {
+                "Id": "MethodNotImplemented",
+                "Code": 404,
+                "Message": f"TestAuthRemoteService.{method} is not implemented",
+                "Params": {},
+            },
+        }
+
     def handle_google_auth_service(self, method: str, params: List, client_id: int = None) -> Dict[str, Any]:
         """Обработка Google аутентификации"""
         if method == "auth":
-            return {"Return": str(uuid.uuid4()), "Exception": None}
-        return {"Return": None, "Exception": None}
+            token = params[0] if params else ""
+            version = params[1] if len(params) > 1 else ""
+            hash_val = params[2] if len(params) > 2 else ""
+            user_id = self._make_external_user_id("google", token)
+            return self._issue_ticket_for_user(user_id, version, hash_val, client_id)
+
+        if method in ("protoAuth", "encryptedAuth"):
+            auth = params[0] if params else {}
+            verification = params[1] if len(params) > 1 else {}
+
+            auth_code = ""
+            version = ""
+            if isinstance(auth, dict):
+                auth_code = auth.get("AuthCode") or auth.get("authCode") or ""
+                version = auth.get("GameVersion") or auth.get("gameVersion") or ""
+
+            hash_val = ""
+            if isinstance(verification, dict):
+                hash_val = verification.get("Hash") or verification.get("hash") or ""
+
+            user_id = self._make_external_user_id("google", auth_code)
+            return self._issue_ticket_for_user(user_id, version, hash_val, client_id)
+
+        return {
+            "Return": None,
+            "Exception": {
+                "Id": "MethodNotImplemented",
+                "Code": 404,
+                "Message": f"GoogleAuthRemoteService.{method} is not implemented",
+                "Params": {},
+            },
+        }
     
     def handle_facebook_auth_service(self, method: str, params: List, client_id: int = None) -> Dict[str, Any]:
         """Обработка Facebook аутентификации"""
         if method == "auth":
-            return {"Return": str(uuid.uuid4()), "Exception": None}
-        return {"Return": None, "Exception": None}
+            # Signature: (gameId, gameVersion, platform, token)
+            _game_id = params[0] if params else ""
+            version = params[1] if len(params) > 1 else ""
+            _platform = params[2] if len(params) > 2 else 0
+            token = params[3] if len(params) > 3 else ""
+            _ = (_game_id, _platform)
+            user_id = self._make_external_user_id("facebook", token)
+            return self._issue_ticket_for_user(user_id, version, "", client_id)
+
+        if method in ("protoAuth", "encryptedAuth"):
+            auth = params[0] if params else {}
+            verification = params[1] if len(params) > 1 else {}
+
+            token = ""
+            version = ""
+            if isinstance(auth, dict):
+                token = auth.get("Token") or auth.get("token") or ""
+                version = auth.get("GameVersion") or auth.get("gameVersion") or ""
+
+            hash_val = ""
+            if isinstance(verification, dict):
+                hash_val = verification.get("Hash") or verification.get("hash") or ""
+
+            user_id = self._make_external_user_id("facebook", token)
+            return self._issue_ticket_for_user(user_id, version, hash_val, client_id)
+
+        return {
+            "Return": None,
+            "Exception": {
+                "Id": "MethodNotImplemented",
+                "Code": 404,
+                "Message": f"FacebookAuthRemoteService.{method} is not implemented",
+                "Params": {},
+            },
+        }
     
     def handle_gamecenter_auth_service(self, method: str, params: List, client_id: int = None) -> Dict[str, Any]:
         """Обработка GameCenter аутентификации"""
