@@ -3,6 +3,7 @@ import asyncio
 import websockets
 import json
 import logging
+import os
 import signal
 import sys
 import threading
@@ -14,6 +15,50 @@ from typing import Dict, Set
 from rpc_handlers import RPCHandler, DateTimeEncoder
 from database import Database
 from telegram_logging import setup_telegram_logging
+
+
+def _load_dotenv() -> None:
+    """
+    Minimal .env loader (no external deps).
+
+    Loads variables from:
+    - old_server/.env (same directory as this file)
+    - ../.env (repo root), as a fallback
+
+    Existing os.environ values are NOT overwritten.
+    """
+    try:
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        candidates = [
+            os.path.join(base_dir, ".env"),
+            os.path.join(base_dir, "..", ".env"),
+        ]
+        path = next((p for p in candidates if os.path.exists(p)), None)
+        if not path:
+            return
+
+        with open(path, "r", encoding="utf-8") as f:
+            for raw_line in f:
+                line = (raw_line or "").strip()
+                if not line or line.startswith("#"):
+                    continue
+                if line.lower().startswith("export "):
+                    line = line[7:].strip()
+                if "=" not in line:
+                    continue
+                key, value = line.split("=", 1)
+                key = (key or "").strip()
+                if not key or key in os.environ:
+                    continue
+                value = (value or "").strip()
+                if (value.startswith('"') and value.endswith('"')) or (value.startswith("'") and value.endswith("'")):
+                    value = value[1:-1]
+                os.environ[key] = value
+    except Exception:
+        return
+
+
+_load_dotenv()
 
 # Настройка логирования
 logging.basicConfig(
@@ -115,12 +160,13 @@ class HttpHandler(BaseHTTPRequestHandler):
                     if rpc:  # Проверяем, что rpc инициализирован
                         result = rpc.activate_promocode(str(user_id), str(promo))
                     else:
-                        result = "server_not_ready"
+                        # Client expects only: "notfound" | "limit" | "error" OR a JSON array string.
+                        result = "error"
                 except Exception as e:
                     logger.error(f"Promocode handler error: {e}")
                     result = "error"
 
-                body = (result or "error").encode("utf-8")
+                body = (str(result or "error").strip() or "error").encode("utf-8")
                 self.send_response(200)
                 self.send_header("Content-Type", "text/plain; charset=utf-8")
                 self.send_header("Content-Length", str(len(body)))
