@@ -4,6 +4,7 @@ import random
 import os
 import logging
 import hashlib
+import copy
 from datetime import datetime, timedelta
 from typing import Dict, List, Any, Optional
 from database import Database
@@ -1336,31 +1337,116 @@ class RPCHandler:
     def handle_gamecenter_auth_service(self, method: str, params: List, client_id: int = None) -> Dict[str, Any]:
         """Обработка GameCenter аутентификации"""
         if method == "auth":
-            return {"Return": str(uuid.uuid4()), "Exception": None}
-        return {"Return": None, "Exception": None}
+            # Signature:
+            # (gameId, gameVersion, platform, playerId, bundleId, publicKeyUrl, signature, salt, timestamp, defaultName)
+            _game_id = params[0] if params else ""
+            version = params[1] if len(params) > 1 else ""
+            _platform = params[2] if len(params) > 2 else 0
+            player_id = params[3] if len(params) > 3 else ""
+            default_name = params[9] if len(params) > 9 else ""
+            _ = (_game_id, _platform)
+
+            # GameCenter provides a stable playerId.
+            user_id = self._make_external_user_id("gamecenter", player_id) or str(player_id or "").strip()
+            result = self._issue_ticket_for_user(user_id, version, "", client_id)
+
+            # Best-effort initial name from platform, without overwriting custom names.
+            try:
+                if not result.get("Exception") and default_name:
+                    existing = self.db.get_user(user_id) or {}
+                    if str(existing.get("Name") or "").strip() in ("", "Player"):
+                        self.db.update_user(user_id, {"Name": str(default_name)[:32]})
+            except Exception:
+                pass
+            return result
+
+        return {
+            "Return": None,
+            "Exception": {
+                "Id": "MethodNotImplemented",
+                "Code": 404,
+                "Message": f"GameCenterAuthRemoteService.{method} is not implemented",
+                "Params": {},
+            },
+        }
     
     # ===== HANDSHAKE =====
     
     def handle_handshake_service(self, method: str, params: List, client_id: int = None) -> Dict[str, Any]:
         """Обработка handshake"""
-        if method == "handshake":
+        def resolve_ticket_from_params() -> str:
+            if not params:
+                return ""
+            if method == "encryptedHandshake":
+                # Param0 is Handshake protobuf which becomes a dict: { "Ticket": "..." }
+                p0 = params[0]
+                if isinstance(p0, dict):
+                    return str(p0.get("Ticket") or p0.get("ticket") or "").strip()
+                return str(p0 or "").strip()
+            return str(params[0] or "").strip()
+
+        if method in ("handshake", "secureHandshake", "encryptedHandshake"):
+            ticket = resolve_ticket_from_params()
+            version = params[1] if len(params) > 1 else ""
+
+            if not ticket:
+                return {"Return": "OK", "Exception": None}
+
+            user_id = self.current_sessions.get(ticket) or self.db.get_session(ticket)
+            if not user_id:
+                return {
+                    "Return": None,
+                    "Exception": {"Id": "InvalidTicket", "Code": 401, "Message": "Invalid session ticket", "Params": {}},
+                }
+
+            self.current_sessions[ticket] = user_id
+            if client_id and self.clients_manager:
+                self.clients_manager.set_user_id(client_id, user_id)
+
+            try:
+                self.db.update_user(
+                    user_id,
+                    {
+                        "GameVersion": str(version) if version is not None else "",
+                        "PlayerStatus": {"OnlineStatus": "StateOnline", "PlayInGame": None},
+                    },
+                )
+            except Exception:
+                pass
+            self._notify_friends_player_status_changed(user_id)
             return {"Return": "OK", "Exception": None}
-        
-        elif method == "secureHandshake":
-            return {"Return": "OK", "Exception": None}
-        
-        elif method == "logout":
+
+        if method == "logout":
             user_id = self.get_current_user_id(client_id)
             if user_id:
-                self.db.update_user(user_id, {
-                    "PlayerStatus": {
-                        "OnlineStatus": "StateOffline",
-                        "PlayInGame": None
-                    }
-                })
+                try:
+                    self._leave_lobby_server_side(user_id)
+                except Exception:
+                    pass
+                try:
+                    self.db.update_user(
+                        user_id,
+                        {"PlayerStatus": {"OnlineStatus": "StateOffline", "PlayInGame": None}},
+                    )
+                except Exception:
+                    pass
+                self._notify_friends_player_status_changed(user_id)
+            if client_id and self.clients_manager:
+                try:
+                    self.clients_manager.set_user_id(client_id, None)
+                except Exception:
+                    pass
             return {"Return": "OK", "Exception": None}
-        
-        return {"Return": None, "Exception": None}
+
+        return {
+            "Return": None,
+            "Exception": {
+                "Id": "MethodNotImplemented",
+                "Code": 404,
+                "Message": f"HandshakeRemoteService.{method} is not implemented",
+                "Params": {},
+            },
+        }
     
     # ===== PLAYER SERVICE =====
     
@@ -1639,9 +1725,17 @@ class RPCHandler:
                         if not part:
                             continue
                         try:
-                            candidates.append(int(part))
+                            cand_id = int(part)
                         except Exception:
                             continue
+
+                        # Client expects the result of case opening to be a skin/gloves definition.
+                        # Filter out badges/frames/cases/boxes/etc even if they are present in `contains`.
+                        cand_def = self._item_definitions_cache.get(cand_id) or self.db.get_item_definition(cand_id)
+                        cand_type = cand_def.get("Type") if isinstance(cand_def, dict) else None
+                        if cand_type not in ("weapon", "knife", "gloves"):
+                            continue
+                        candidates.append(cand_id)
                 else:
                     collection = str(props.get("collection", "") or "")
                     is_box = case_def.get("Type") == "box"
@@ -2205,11 +2299,28 @@ class RPCHandler:
             except Exception:
                 return 0
 
+        def normalized_max_members(lobby_type: int, requested: int) -> int:
+            # Match UI expectations:
+            # - Public lobby: 5 players
+            # - FriendsOnly/Private/Invisible: 10 players
+            try:
+                lt = int(lobby_type)
+            except Exception:
+                lt = 2
+            if lt == 2:
+                return 5
+            if lt in (0, 1, 3):
+                return 10
+            try:
+                return max(2, min(10, int(requested or 10)))
+            except Exception:
+                return 10
+
         if method == "createLobby":
             name = str(params[0]) if params else "Lobby"
             lobby_type = int(params[1]) if len(params) > 1 else 2  # Public
-            max_members = int(params[2]) if len(params) > 2 else 5
-            max_members = max(2, min(5, max_members))
+            requested_max_members = int(params[2]) if len(params) > 2 else 10
+            max_members = normalized_max_members(lobby_type, requested_max_members)
 
             lobby_data = {
                 "name": name,
@@ -2266,7 +2377,7 @@ class RPCHandler:
             owner_id = str(lobby.get("owner_id") or "")
 
             # Restrict joining for non-public lobbies.
-            if lobby_type in (0, 1) and user_id not in invited_ids and user_id != owner_id:
+            if lobby_type in (0, 1, 3) and user_id not in invited_ids and user_id != owner_id:
                 if lobby_type == 1:
                     # FriendsOnly: require friendship with owner.
                     if self.db.get_friend_status(owner_id, user_id) != 3 and self.db.get_friend_status(user_id, owner_id) != 3:
@@ -2502,11 +2613,16 @@ class RPCHandler:
             owner_id = str(lobby.get("owner_id") or "")
             if owner_id != user_id:
                 return exc(EX_NOT_LOBBY_OWNER, "NotLobbyOwner", "Only owner can change lobby type")
-            self.db.update_lobby(lobby_id, {"type": lobby_type})
             members = lobby.get("members") if isinstance(lobby.get("members"), list) else []
+            members = [str(m) for m in members if str(m)]
+            new_max = normalized_max_members(lobby_type, int(lobby.get("max_members", 10) or 10))
+            if len(members) > new_max:
+                new_max = min(10, len(members))
+            self.db.update_lobby(lobby_id, {"type": lobby_type, "max_members": new_max})
             lobby_type_name = self._lobby_type_to_name(lobby_type)
             for mid in members:
                 self._queue_event_to_user(str(mid), "MatchmakingRemoteEventListener", "onLobbyTypeChanged", [lobby_type_name])
+                self._queue_event_to_user(str(mid), "MatchmakingRemoteEventListener", "onLobbyMaxMembersChanged", [new_max])
             return {"Return": "OK", "Exception": None}
 
         if method == "setLobbyOwner":
@@ -2528,7 +2644,7 @@ class RPCHandler:
             return {"Return": "OK", "Exception": None}
 
         if method == "setLobbyMaxMembers":
-            max_members = int(params[0]) if params else 5
+            requested_max_members = int(params[0]) if params else 10
             lobby = self._get_current_lobby(user_id)
             if not lobby:
                 return exc(EX_NOT_IN_LOBBY, "NotInLobby", "Not in lobby")
@@ -2536,7 +2652,8 @@ class RPCHandler:
             owner_id = str(lobby.get("owner_id") or "")
             if owner_id != user_id:
                 return exc(EX_NOT_LOBBY_OWNER, "NotLobbyOwner", "Only owner can change max members")
-            max_members = max(2, min(5, max_members))
+            lobby_type = int(lobby.get("type", 0) or 0)
+            max_members = normalized_max_members(lobby_type, requested_max_members)
             self.db.update_lobby(lobby_id, {"max_members": max_members})
             members = lobby.get("members") if isinstance(lobby.get("members"), list) else []
             for mid in members:
@@ -3092,12 +3209,14 @@ class RPCHandler:
                 played_old = int(other_stats.get("ranked_played_matches", "0"))
                 won_old = int(other_stats.get("ranked_won_matches", "0"))
                 calibration_old = int(other_stats.get("ranked_calibration_match_count", "0"))
+                calibration_won_old = int(other_stats.get("ranked_calibration_won_match_count", "0"))
             except Exception:
                 rank_old = 0
                 mmr_old = 1000
                 played_old = 0
                 won_old = 0
                 calibration_old = 0
+                calibration_won_old = 0
 
             delta = 25 if is_win else -25
             mmr_new = max(0, mmr_old + delta)
@@ -3105,10 +3224,38 @@ class RPCHandler:
             played_new = played_old + 1
             won_new = won_old + (1 if is_win else 0)
 
-            calibration_new = calibration_old
+            calibration_new = int(calibration_old)
+            calibration_won_new = int(calibration_won_old)
+            was_calibrating = calibration_old < 10
             if calibration_new < 10:
                 calibration_new += 1
+                if is_win:
+                    calibration_won_new += 1
             calibration_left = max(0, 10 - calibration_new)
+
+            def rank_from_mmr(mmr: int) -> int:
+                # Must match client ProfileSettings:
+                # StartRankUpMmr = 300, RankUpMmrK = 150, Ranks.Length = 18 (0..17).
+                start = 300
+                step = 150
+                max_rank = 17
+                try:
+                    mmr_i = int(mmr)
+                except Exception:
+                    mmr_i = 0
+                if mmr_i <= start:
+                    return 0
+                rank = int((mmr_i - start) // step)
+                return max(0, min(max_rank, rank))
+
+            assigned_rank = rank_old
+            rank_new_for_response = -1
+            if calibration_left <= 0:
+                assigned_rank = rank_from_mmr(mmr_new)
+                if was_calibrating:
+                    rank_new_for_response = assigned_rank
+                elif assigned_rank != rank_old:
+                    rank_new_for_response = assigned_rank
 
             now_parts = self._split_long_to_int_parts(self._dotnet_utc_seconds())
 
@@ -3117,7 +3264,9 @@ class RPCHandler:
             other_stats["ranked_played_matches"] = str(played_new)
             other_stats["ranked_won_matches"] = str(won_new)
             other_stats["ranked_calibration_match_count"] = str(calibration_new)
-            other_stats["ranked_calibration_status"] = "1" if calibration_new >= 10 else "0"
+            other_stats["ranked_calibration_won_match_count"] = str(calibration_won_new)
+            other_stats["ranked_calibration_status"] = "1" if calibration_left <= 0 else "0"
+            other_stats["ranked_rank"] = str(assigned_rank)
             other_stats["ranked_last_activity_time1"] = str(now_parts[0])
             other_stats["ranked_last_activity_time2"] = str(now_parts[1])
             other_stats["ranked_last_match_status"] = "1"
@@ -3126,7 +3275,7 @@ class RPCHandler:
 
             return {
                 "Return": {
-                    "RankNew": rank_old,
+                    "RankNew": rank_new_for_response,
                     "RankOld": rank_old,
                     "Mmr": mmr_new,
                     "CalibrationMatchesLeft": calibration_left,
